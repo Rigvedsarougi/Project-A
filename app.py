@@ -136,8 +136,20 @@ if 'data' in st.session_state:
         rsi_fig.update_layout(height=400, title="RSI (14-day)")
         st.plotly_chart(rsi_fig, use_container_width=True)
 
+
 def backtest_strategy(data, sma_short=20, sma_long=50):
     data = data.copy()
+    
+    # Calculate SMAs
+    data['SMA_short'] = data['Close'].rolling(window=sma_short).mean()
+    data['SMA_long'] = data['Close'].rolling(window=sma_long).mean()
+    
+    # Generate signals
+    data['Signal'] = 0
+    data.loc[data['SMA_short'] > data['SMA_long'], 'Signal'] = 1
+    
+    # Calculate position changes
+    data['Position'] = data['Signal'].diff()
     
     # Calculate SMAs if not already present
     if 'SMA_20' not in data.columns:
@@ -249,6 +261,11 @@ if 'data' in st.session_state:
         else:
             data = st.session_state['backtest_data'].copy()
             
+            # Ensure we have Position column
+            if 'Position' not in data.columns:
+                st.error("Position column not found. Please run backtest first.")
+                st.stop()
+            
             # Initialize account
             account = pd.DataFrame(index=data.index)
             account['Cash'] = initial_capital
@@ -256,26 +273,30 @@ if 'data' in st.session_state:
             account['Total'] = initial_capital
             
             for i in range(1, len(data)):
-                account.at[data.index[i], 'Cash'] = account.at[data.index[i-1], 'Cash']
-                account.at[data.index[i], 'Shares'] = account.at[data.index[i-1], 'Shares']
+                # Carry forward previous values
+                account.loc[data.index[i], 'Cash'] = account.loc[data.index[i-1], 'Cash']
+                account.loc[data.index[i], 'Shares'] = account.loc[data.index[i-1], 'Shares']
+                
+                # Get position change (use .loc for proper access)
+                position_change = data.loc[data.index[i], 'Position']
                 
                 # Buy signal
-                if data.at[data.index[i], 'Position'] == 1:
-                    shares_to_buy = account.at[data.index[i], 'Cash'] // data.at[data.index[i], 'Open']
+                if position_change == 1:
+                    shares_to_buy = account.loc[data.index[i], 'Cash'] // data.loc[data.index[i], 'Open']
                     if shares_to_buy > 0:
-                        account.at[data.index[i], 'Cash'] -= shares_to_buy * data.at[data.index[i], 'Open'] + commission
-                        account.at[data.index[i], 'Shares'] += shares_to_buy
+                        account.loc[data.index[i], 'Cash'] -= shares_to_buy * data.loc[data.index[i], 'Open'] + commission
+                        account.loc[data.index[i], 'Shares'] += shares_to_buy
                 
                 # Sell signal
-                elif data.at[data.index[i], 'Position'] == -1:
-                    if account.at[data.index[i], 'Shares'] > 0:
-                        account.at[data.index[i], 'Cash'] += account.at[data.index[i], 'Shares'] * data.at[data.index[i], 'Open'] - commission
-                        account.at[data.index[i], 'Shares'] = 0
+                elif position_change == -1:
+                    if account.loc[data.index[i], 'Shares'] > 0:
+                        account.loc[data.index[i], 'Cash'] += account.loc[data.index[i], 'Shares'] * data.loc[data.index[i], 'Open'] - commission
+                        account.loc[data.index[i], 'Shares'] = 0
                 
                 # Update total value
-                account.at[data.index[i], 'Total'] = (
-                    account.at[data.index[i], 'Cash'] + 
-                    account.at[data.index[i], 'Shares'] * data.at[data.index[i], 'Close']
+                account.loc[data.index[i], 'Total'] = (
+                    account.loc[data.index[i], 'Cash'] + 
+                    account.loc[data.index[i], 'Shares'] * data.loc[data.index[i], 'Close']
                 )
             
             st.session_state['account'] = account
