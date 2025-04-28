@@ -72,7 +72,7 @@ if 'data' in st.session_state:
     plot_tab, stats_tab = st.tabs(["Chart", "Statistics"])
     
     with plot_tab:
-        plot_type = st.radio("Chart Type", ["Candlestick", "Line"])
+        plot_type = st.radio("Chart Type", ["Candlestick", "Line"], key="chart_type")
         if plot_type == "Candlestick":
             plot_candlestick(st.session_state['data'])
         else:
@@ -139,23 +139,22 @@ if 'data' in st.session_state:
 def backtest_strategy(data, sma_short=20, sma_long=50):
     data = data.copy()
     
-    # Calculate SMAs if not already present
-    if 'SMA_20' not in data.columns:
-        data['SMA_short'] = data['Close'].rolling(window=sma_short).mean()
-        data['SMA_long'] = data['Close'].rolling(window=sma_long).mean()
-    else:
-        data['SMA_short'] = data['SMA_20']
-        data['SMA_long'] = data['SMA_50']
+    # Calculate SMAs
+    data['SMA_short'] = data['Close'].rolling(window=sma_short).mean()
+    data['SMA_long'] = data['Close'].rolling(window=sma_long).mean()
     
     # Generate signals
     data['Signal'] = 0
-    data['Signal'][sma_short:] = np.where(
-        data['SMA_short'][sma_short:] > data['SMA_long'][sma_short:], 1, 0)
+    data.loc[data['SMA_short'] > data['SMA_long'], 'Signal'] = 1
+    
+    # Calculate position changes (1 = buy, -1 = sell)
     data['Position'] = data['Signal'].diff()
     
     # Calculate returns
     data['Daily_Return'] = data['Close'].pct_change()
     data['Strategy_Return'] = data['Position'].shift(1) * data['Daily_Return']
+    
+    # Calculate cumulative returns
     data['Cumulative_Market'] = (1 + data['Daily_Return']).cumprod()
     data['Cumulative_Strategy'] = (1 + data['Strategy_Return']).cumprod()
     
@@ -204,38 +203,41 @@ if 'data' in st.session_state:
         st.metric("Strategy Return", f"{strategy_return:.2%}")
         st.metric("Outperformance", f"{(strategy_return - market_return):.2%}")
 
-if 'backtest_data' in st.session_state:
+if 'data' in st.session_state:
     st.subheader("Risk Analysis")
     
-    # Calculate drawdown
-    cumulative_max = st.session_state['backtest_data']['Cumulative_Strategy'].cummax()
-    drawdown = (st.session_state['backtest_data']['Cumulative_Strategy'] - cumulative_max) / cumulative_max
-    
-    # Plot drawdown
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=st.session_state['backtest_data'].index,
-        y=drawdown,
-        fill='tozeroy',
-        name='Drawdown'
-    ))
-    fig.update_layout(
-        title="Strategy Drawdown",
-        yaxis_title="Drawdown",
-        yaxis_tickformat=".1%",
-        height=400
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Risk metrics
-    max_drawdown = drawdown.min()
-    volatility = st.session_state['backtest_data']['Strategy_Return'].std() * np.sqrt(252)
-    sharpe_ratio = st.session_state['backtest_data']['Strategy_Return'].mean() / st.session_state['backtest_data']['Strategy_Return'].std() * np.sqrt(252)
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Max Drawdown", f"{max_drawdown:.2%}")
-    col2.metric("Annualized Volatility", f"{volatility:.2%}")
-    col3.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+    if 'backtest_data' not in st.session_state:
+        st.warning("Please run a backtest first to see risk analysis")
+    else:
+        # Calculate drawdown
+        cumulative_max = st.session_state['backtest_data']['Cumulative_Strategy'].cummax()
+        drawdown = (st.session_state['backtest_data']['Cumulative_Strategy'] - cumulative_max) / cumulative_max
+        
+        # Plot drawdown
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=st.session_state['backtest_data'].index,
+            y=drawdown,
+            fill='tozeroy',
+            name='Drawdown'
+        ))
+        fig.update_layout(
+            title="Strategy Drawdown",
+            yaxis_title="Drawdown",
+            yaxis_tickformat=".1%",
+            height=400
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Risk metrics
+        max_drawdown = drawdown.min()
+        volatility = st.session_state['backtest_data']['Strategy_Return'].std() * np.sqrt(252)
+        sharpe_ratio = st.session_state['backtest_data']['Strategy_Return'].mean() / st.session_state['backtest_data']['Strategy_Return'].std() * np.sqrt(252)
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Max Drawdown", f"{max_drawdown:.2%}")
+        col2.metric("Annualized Volatility", f"{volatility:.2%}")
+        col3.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
 
 if 'data' in st.session_state:
     st.subheader("Paper Trading Simulation")
@@ -245,59 +247,69 @@ if 'data' in st.session_state:
     
     if st.button("Run Simulation"):
         if 'backtest_data' not in st.session_state:
-            st.warning("Please run a backtest first")
-        else:
-            data = st.session_state['backtest_data'].copy()
+            with st.spinner("Running initial backtest..."):
+                st.session_state['backtest_data'] = backtest_strategy(st.session_state['data'].copy())
+        
+        data = st.session_state['backtest_data'].copy()
+        
+        # Ensure we have Position column
+        if 'Position' not in data.columns:
+            st.error("Position column not found. Please run backtest first.")
+            st.stop()
+        
+        # Initialize account
+        account = pd.DataFrame(index=data.index)
+        account['Cash'] = initial_capital
+        account['Shares'] = 0
+        account['Total'] = initial_capital
+        
+        for i in range(1, len(data)):
+            # Carry forward previous values
+            account.loc[data.index[i], 'Cash'] = account.loc[data.index[i-1], 'Cash']
+            account.loc[data.index[i], 'Shares'] = account.loc[data.index[i-1], 'Shares']
             
-            # Initialize account
-            account = pd.DataFrame(index=data.index)
-            account['Cash'] = initial_capital
-            account['Shares'] = 0
-            account['Total'] = initial_capital
+            # Get position change
+            position_change = data.loc[data.index[i], 'Position']
             
-            for i in range(1, len(data)):
-                account.at[data.index[i], 'Cash'] = account.at[data.index[i-1], 'Cash']
-                account.at[data.index[i], 'Shares'] = account.at[data.index[i-1], 'Shares']
-                
-                # Buy signal
-                if data.at[data.index[i], 'Position'] == 1:
-                    shares_to_buy = account.at[data.index[i], 'Cash'] // data.at[data.index[i], 'Open']
-                    if shares_to_buy > 0:
-                        account.at[data.index[i], 'Cash'] -= shares_to_buy * data.at[data.index[i], 'Open'] + commission
-                        account.at[data.index[i], 'Shares'] += shares_to_buy
-                
-                # Sell signal
-                elif data.at[data.index[i], 'Position'] == -1:
-                    if account.at[data.index[i], 'Shares'] > 0:
-                        account.at[data.index[i], 'Cash'] += account.at[data.index[i], 'Shares'] * data.at[data.index[i], 'Open'] - commission
-                        account.at[data.index[i], 'Shares'] = 0
-                
-                # Update total value
-                account.at[data.index[i], 'Total'] = (
-                    account.at[data.index[i], 'Cash'] + 
-                    account.at[data.index[i], 'Shares'] * data.at[data.index[i], 'Close']
-                )
+            # Buy signal
+            if position_change == 1:
+                shares_to_buy = account.loc[data.index[i], 'Cash'] // data.loc[data.index[i], 'Open']
+                if shares_to_buy > 0:
+                    account.loc[data.index[i], 'Cash'] -= shares_to_buy * data.loc[data.index[i], 'Open'] + commission
+                    account.loc[data.index[i], 'Shares'] += shares_to_buy
             
-            st.session_state['account'] = account
+            # Sell signal
+            elif position_change == -1:
+                if account.loc[data.index[i], 'Shares'] > 0:
+                    account.loc[data.index[i], 'Cash'] += account.loc[data.index[i], 'Shares'] * data.loc[data.index[i], 'Open'] - commission
+                    account.loc[data.index[i], 'Shares'] = 0
             
-            # Plot account value
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=account.index,
-                y=account['Total'],
-                name='Account Value'
-            ))
-            fig.update_layout(
-                title="Paper Trading Account Value",
-                yaxis_title="Value ($)",
-                height=500
+            # Update total value
+            account.loc[data.index[i], 'Total'] = (
+                account.loc[data.index[i], 'Cash'] + 
+                account.loc[data.index[i], 'Shares'] * data.loc[data.index[i], 'Close']
             )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            final_value = account['Total'].iloc[-1]
-            pnl = final_value - initial_capital
-            roi = pnl / initial_capital
-            
-            col1, col2 = st.columns(2)
-            col1.metric("Final Account Value", f"${final_value:,.2f}")
-            col2.metric("Profit/Loss", f"${pnl:,.2f} ({roi:.2%})")
+        
+        st.session_state['account'] = account
+        
+        # Plot account value
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=account.index,
+            y=account['Total'],
+            name='Account Value'
+        ))
+        fig.update_layout(
+            title="Paper Trading Account Value",
+            yaxis_title="Value ($)",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        final_value = account['Total'].iloc[-1]
+        pnl = final_value - initial_capital
+        roi = pnl / initial_capital
+        
+        col1, col2 = st.columns(2)
+        col1.metric("Final Account Value", f"${final_value:,.2f}")
+        col2.metric("Profit/Loss", f"${pnl:,.2f} ({roi:.2%})")
